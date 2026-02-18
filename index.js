@@ -10,7 +10,7 @@ app.use(cors());
 const server = http.createServer(app);
 const io = new Server(server, {
     cors: {
-        origin: "*", // Allow all origins for now (dev mode)
+        origin: "*",
         methods: ["GET", "POST"]
     }
 });
@@ -25,7 +25,6 @@ io.on('connection', (socket) => {
             const game = gameManager.createGame(playerName, socket.id, range);
             socket.join(game.roomCode);
             socket.emit('game_created', game);
-            // Also emit update to lobby
             io.to(game.roomCode).emit('player_joined', { players: game.players });
         } catch (e) {
             socket.emit('error', { message: e.message });
@@ -43,12 +42,26 @@ io.on('connection', (socket) => {
         }
     });
 
+    // Reconnect after page refresh — player already exists in game
+    socket.on('rejoin_game', ({ roomCode, playerName }) => {
+        const result = gameManager.rejoinGame(roomCode, playerName, socket.id);
+        if (result.error) {
+            socket.emit('error', { message: result.error });
+        } else {
+            socket.join(roomCode);
+            // Send full game state back to the rejoining player
+            socket.emit('game_rejoined', result.game);
+            // Notify others that the player is back
+            io.to(roomCode).emit('player_joined', { players: result.game.players });
+            console.log(`${playerName} rejoined room ${roomCode}`);
+        }
+    });
+
     socket.on('start_game', ({ roomCode }) => {
         const game = gameManager.startGame(roomCode);
         if (game.error) {
             socket.emit('error', { message: game.error });
         } else {
-            // Emit game_started event with the full game object
             io.to(roomCode).emit('game_started', game);
         }
     });
@@ -59,7 +72,6 @@ io.on('connection', (socket) => {
             if (result.action === 'START_PLAYING') {
                 io.to(roomCode).emit('game_started', result.game);
             } else {
-                // Notify that this player is ready
                 io.to(roomCode).emit('player_ready_update', { players: result.game.players });
             }
         }
@@ -87,11 +99,8 @@ io.on('connection', (socket) => {
 
     socket.on('disconnect', () => {
         console.log('User disconnected:', socket.id);
-        const result = gameManager.removePlayer(socket.id);
-        if (result && result.action === 'PLAYER_LEFT') {
-            io.to(result.roomCode).emit('player_left', { players: result.game.players });
-            // Optionally handle game abort or pause
-        }
+        // Use grace period — gives 10s for page refresh to reconnect
+        gameManager.scheduleRemovePlayer(socket.id);
     });
 });
 
